@@ -1,8 +1,11 @@
 # Section 3: Installing Prometheus with APT
 
 **Module:** 01 - Introduction to Observability: Prometheus and Grafana Setup
+
 **Duration:** approximately 5 minutes
+
 **Hands-on:** Yes. Runs on a plain Ubuntu VM, not on Kubernetes.
+
 **Prerequisites:** Section 2. An Ubuntu EC2 instance separate from your EKS jump box.
 
 ---
