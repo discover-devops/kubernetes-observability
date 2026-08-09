@@ -44,25 +44,31 @@ Do not use this approach in production on Kubernetes. That is the point of the s
 
 ## Before You Start
 
-This section runs on the same Ubuntu jump box you use for everything else. Nothing here touches the Kubernetes cluster.
+This section runs on a separate Ubuntu virtual machine, not on the jump box you use for the EKS labs.
 
-That is worth stating clearly, because the machine does have kubectl and a working kubeconfig. The Prometheus you are about to install has no idea any of that exists. It has no service account, no cluster credentials, and no path to the Kubernetes API. It is a plain Linux process reading a plain text file, and that isolation is the whole point of the section.
+Keeping them apart is deliberate. This machine has no kubectl, no kubeconfig, no AWS credentials for the cluster, and no awareness that Kubernetes exists anywhere. When the section concludes that this Prometheus cannot see your cluster, that is a literal fact about the machine rather than a claim you have to accept.
 
-You will need one security group rule on the jump box:
+It also keeps the two installations from interfering. Both Prometheus installations use port 9090, and running them on one machine would produce a port conflict that has nothing to teach you about monitoring.
+
+**Machine specification**
+
+| Setting | Value |
+|---|---|
+| AMI | Ubuntu Server 24.04 LTS or later |
+| Instance type | t3.micro is sufficient |
+| Storage | Default 8 GB |
+| Public IP | Required |
+
+Nothing else needs to be installed on it. No kubectl, no AWS CLI, no Helm.
+
+**Security group rule**
 
 | Type | Protocol | Port | Source |
 |---|---|---|---|
+| SSH | TCP | 22 | Your IP address |
 | Custom TCP | TCP | 9090 | Your IP address |
 
 Set the source to your own IP, not `0.0.0.0/0`. This Prometheus has no authentication of any kind.
-
-### Important: port 9090 is used again later
-
-The apt package binds Prometheus to port 9090 and starts it automatically at boot.
-
-Section 4 and Section 9 reach the Kubernetes Prometheus UI with `kubectl port-forward` on the same port. If this installation is still running at that point, port-forward fails with `address already in use`, and the error names the port rather than the cause. You would be looking at your cluster while the actual problem is a leftover systemd service.
-
-The [Cleanup](#cleanup) step at the end of this section is therefore a hard prerequisite for Section 4, not optional housekeeping. Do not skip it.
 
 Confirm the operating system before starting:
 
@@ -304,9 +310,9 @@ Either the instance has no public IP assigned, or IMDSv2 token retrieval failed.
 
 ## Cleanup
 
-Remove this installation before starting Section 4. This is required, not optional.
+This machine has served its purpose. The simplest cleanup is to terminate the instance entirely, which removes the installation, the exposed web UI, and the running cost in one action.
 
-The apt package holds port 9090 and restarts itself at boot. Section 4 needs that port free for `kubectl port-forward` to the Kubernetes Prometheus. Leaving this running also keeps an unauthenticated web UI exposed.
+If you would rather keep the machine, remove the packages instead.
 
 ```bash
 sudo systemctl stop prometheus prometheus-alertmanager
@@ -325,9 +331,9 @@ sudo ss -tlnp | grep 9090
 
 No output is the correct result.
 
-Leave the port 9090 security group rule in place. Section 4 uses the same port to reach the Kubernetes Prometheus UI.
+Then terminate the instance, or stop it if you want to keep it for reference.
 
-The rest of this module runs against the EKS cluster from this same machine.
+Everything from Section 4 onward runs on the EKS jump box, which is a different machine. Nothing from this section carries forward except the understanding of what was missing.
 
 ---
 

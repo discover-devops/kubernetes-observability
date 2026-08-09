@@ -49,33 +49,73 @@ You can substitute another region, but every command in the labs names `ap-south
 
 ---
 
-## The Jump Box
+## Machines Used in This Course
 
-Every command in this course runs from a single Ubuntu EC2 instance. Nothing runs from your laptop.
+Two Ubuntu EC2 instances, with clearly separate roles. They are never used interchangeably.
 
-**Instance specification**
+### The EKS jump box
+
+Used for Section 4 onward, which is everything involving Kubernetes.
 
 | Setting | Value |
 |---|---|
 | AMI | Ubuntu Server 24.04 LTS or later |
-| Instance type | t3.small is sufficient |
+| Instance type | t3.small |
 | Storage | 20 GB gp3 |
 | Region | ap-south-1 |
 | Public IP | Required |
+| IAM role | Attached, with the permissions listed above |
 
-The jump box only runs command line tools. All workloads run on the EKS worker nodes, so it does not need to be large.
+This box runs command line tools only. All workloads run on the EKS worker nodes, so it does not need to be large. Install the tools listed below on this machine.
 
-**Why one machine**
+### The standalone VM
 
-Using a single box keeps the session simple to follow. It also matters for authentication: whichever IAM identity creates the EKS cluster becomes an implicit cluster administrator. If you create the cluster from one machine and try to run `kubectl` from another with a different IAM identity, you get `error: You must be logged in to the server (Unauthorized)` even when that identity has full AWS permissions. Creating and using the cluster from the same box avoids this entirely.
+Used only for Section 3, which installs Prometheus directly on an operating system to demonstrate what that approach cannot do.
 
-**IAM role, not access keys**
+| Setting | Value |
+|---|---|
+| AMI | Ubuntu Server 24.04 LTS or later |
+| Instance type | t3.micro |
+| Storage | Default 8 GB |
+| Public IP | Required |
+| IAM role | Not required |
 
-Attach an IAM role to the instance rather than running `aws configure` with long-lived access keys. Keys stored on disk are a real risk, and an instance role removes the need for them. This course assumes an attached role.
+Install nothing on this machine in advance. No kubectl, no AWS CLI, no Helm. Section 3 installs what it needs through apt, and the machine is terminated when the section ends.
 
-**A note on the public IP**
+Keeping this separate from the jump box matters for two reasons. It makes the isolation real rather than asserted, since the machine genuinely has no path to the cluster. And it avoids a port conflict, because both Prometheus installations listen on 9090 and running them on one machine produces a failure that teaches nothing about monitoring.
 
-If you stop and start the instance, its public IP changes unless an Elastic IP is attached. That breaks your SSH session and any browser URLs you had open. Either leave the instance running for the duration of a session, or attach an Elastic IP.
+---
+
+## IAM Identity and Cluster Access
+
+Worth understanding before you create the cluster, because it causes a confusing failure otherwise.
+
+Two permission systems are involved. AWS IAM governs what you can do to the cluster as an AWS resource: create it, delete it, manage addons. Kubernetes RBAC governs what you can do inside it with kubectl. IAM has no authority over the second.
+
+EKS connects them through access entries, which map an IAM principal to a Kubernetes identity. Without a mapping there is no kubectl access, regardless of IAM permissions. It is entirely possible to hold `AdministratorAccess` and still receive:
+
+```
+error: You must be logged in to the server (Unauthorized)
+```
+
+EKS creates an access entry automatically for whichever IAM principal calls `CreateCluster`, granting it cluster administrator rights. This is implicit. It does not appear in your cluster configuration file and you never request it.
+
+The practical consequence: create the cluster from the jump box and use it from the jump box. Copying a kubeconfig to a machine running under a different IAM role will not work, because the kubeconfig calls `aws eks get-token`, which returns a token for that machine's principal, and that principal has no access entry.
+
+If you ever do need a second machine to reach the cluster, add an access entry rather than copying credentials:
+
+```bash
+eksctl create accessentry \
+  --cluster observability-demo \
+  --region ap-south-1 \
+  --principal-arn arn:aws:iam::ACCOUNT_ID:role/ROLE_NAME \
+  --access-policy-arn arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy \
+  --access-scope-type cluster
+```
+
+### A note on the public IP
+
+If you stop and start an instance, its public IP changes unless an Elastic IP is attached. That breaks your SSH session and any browser URLs you had open. Either leave instances running for the duration of a session, or attach an Elastic IP.
 
 ---
 
@@ -185,7 +225,9 @@ An empty list is the correct result before you have created anything. An `Access
 
 ## Security Group Rules
 
-The jump box needs inbound rules for SSH and for the web interfaces you access during the labs.
+The EKS jump box needs inbound rules for SSH and for the web interfaces reached during the labs.
+
+The standalone VM used in Section 3 needs only SSH and port 9090.
 
 | Type | Protocol | Port | Source | Used by |
 |---|---|---|---|---|
