@@ -41,11 +41,11 @@ Do not use this approach in production on Kubernetes. That is the point of the s
 
 ## Before You Start
 
-This runs on a standalone Ubuntu machine. Do not run it on your EKS jump box.
+This section runs on the same Ubuntu jump box you use for everything else. Nothing here touches the Kubernetes cluster.
 
-Keeping the two separate is part of the lesson. This machine has no kubectl, no kubeconfig, and no awareness that a Kubernetes cluster exists anywhere. That isolation is what makes the limitation visible at the end.
+That is worth stating clearly, because the machine does have kubectl and a working kubeconfig. The Prometheus you are about to install has no idea any of that exists. It has no service account, no cluster credentials, and no path to the Kubernetes API. It is a plain Linux process reading a plain text file, and that isolation is the whole point of the section.
 
-You will need one security group rule on this instance:
+You will need one security group rule on the jump box:
 
 | Type | Protocol | Port | Source |
 |---|---|---|---|
@@ -53,7 +53,15 @@ You will need one security group rule on this instance:
 
 Set the source to your own IP, not `0.0.0.0/0`. This Prometheus has no authentication of any kind.
 
-Confirm which machine you are on before running anything:
+### Important: port 9090 is used again later
+
+The apt package binds Prometheus to port 9090 and starts it automatically at boot.
+
+Section 4 and Section 9 reach the Kubernetes Prometheus UI with `kubectl port-forward` on the same port. If this installation is still running at that point, port-forward fails with `address already in use`, and the error names the port rather than the cause. You would be looking at your cluster while the actual problem is a leftover systemd service.
+
+The [Cleanup](#cleanup) step at the end of this section is therefore a hard prerequisite for Section 4, not optional housekeeping. Do not skip it.
+
+Confirm the operating system before starting:
 
 ```bash
 lsb_release -a
@@ -68,10 +76,6 @@ Description:    Ubuntu 26.04 LTS
 Release:        26.04
 Codename:       resolute
 ```
-
-If this command is not found, you are on the wrong machine. Amazon Linux does not have `lsb_release` or `apt`.
-
----
 
 ## Lab: Install Prometheus from the Package Manager
 
@@ -297,7 +301,9 @@ Either the instance has no public IP assigned, or IMDSv2 token retrieval failed.
 
 ## Cleanup
 
-Remove this installation once the section is finished. Leaving it running serves no purpose and keeps an unauthenticated web UI exposed on port 9090.
+Remove this installation before starting Section 4. This is required, not optional.
+
+The apt package holds port 9090 and restarts itself at boot. Section 4 needs that port free for `kubectl port-forward` to the Kubernetes Prometheus. Leaving this running also keeps an unauthenticated web UI exposed.
 
 ```bash
 sudo systemctl stop prometheus prometheus-alertmanager
@@ -316,9 +322,9 @@ sudo ss -tlnp | grep 9090
 
 No output is the correct result.
 
-Also remove the port 9090 security group rule, and stop or terminate this Ubuntu instance if you do not need it again.
+Leave the port 9090 security group rule in place. Section 4 uses the same port to reach the Kubernetes Prometheus UI.
 
-Everything from here on runs on your EKS jump box.
+The rest of this module runs against the EKS cluster from this same machine.
 
 ---
 
