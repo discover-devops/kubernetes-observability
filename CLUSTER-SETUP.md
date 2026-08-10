@@ -13,6 +13,7 @@ Time to complete: approximately 15 to 20 minutes, most of it waiting.
 - [Why These Choices](#why-these-choices)
 - [Creating the Cluster](#creating-the-cluster)
 - [Verifying the Cluster](#verifying-the-cluster)
+- [Creating a Working StorageClass](#creating-a-working-storageclass)
 - [Verifying Storage](#verifying-storage)
 - [Troubleshooting](#troubleshooting)
 - [Teardown](#teardown)
@@ -109,7 +110,7 @@ Each of these settings exists because omitting it causes a specific failure late
 
 Prometheus, Alertmanager, and Grafana all request PersistentVolumeClaims by default.
 
-EKS ships a `gp2` StorageClass out of the box, so `kubectl get sc` returns a result and the cluster appears ready for storage. But a StorageClass is only a definition. The component that actually provisions the EBS volume is the EBS CSI driver, and it is not installed by default on EKS.
+EKS ships a `gp2` StorageClass out of the box, so `kubectl get sc` returns a result and the cluster appears ready for storage. But that StorageClass uses the in-tree provisioner that was removed in Kubernetes 1.31, and it is not marked default. The component that actually provisions EBS volumes is the EBS CSI driver, which is not installed by default either. Both problems have to be fixed, and the section on creating a StorageClass below covers the second.
 
 Without it, PVCs sit in `Pending` indefinitely, the StatefulSet pods never schedule, and Helm still reports a successful install. It looks like a Helm problem. It is a storage problem, and it is the single most common failure when installing kube-prometheus-stack on a fresh EKS cluster.
 
@@ -198,17 +199,85 @@ Status must be `ACTIVE` and the role ARN must not be empty. An empty ARN means t
 
 ---
 
-## Verifying Storage
+## Creating a Working StorageClass
 
-The most important check. Do not skip it - a two minute test here prevents a twenty minute debugging session during the Helm install.
+This step is required. Skipping it produces a failure that looks like a Helm problem and is not.
+
+### The problem
+
+EKS ships a StorageClass named `gp2`. Run `kubectl get sc` and you will see it, which makes the cluster look ready for storage.
+
+It is not. Look at its provisioner:
 
 ```bash
 kubectl get sc
 ```
 
-You should see `gp2` marked as default.
+```
+NAME   PROVISIONER             RECLAIMPOLICY   VOLUMEBINDINGMODE      ALLOWVOLUMEEXPANSION   AGE
+gp2    kubernetes.io/aws-ebs   Delete          WaitForFirstConsumer   false                  24h
+```
 
-Now prove that provisioning actually works end to end:
+Two things are wrong here.
+
+**The provisioner is `kubernetes.io/aws-ebs`.** That is the old in-tree EBS plugin, which was removed from Kubernetes in version 1.31. On a 1.34 cluster, nothing implements it. The StorageClass is a definition pointing at code that no longer exists.
+
+**There is no `(default)` marker.** Recent EKS versions no longer mark gp2 as the default StorageClass. A PersistentVolumeClaim that does not name a StorageClass gets no class assigned at all, and can never bind.
+
+The combination produces this, which is what you would see after installing any chart that requests storage:
+
+```
+NAME                       STATUS    VOLUME   CAPACITY   STORAGECLASS   AGE
+prometheus-db-prometheus-0 Pending                                      23m
+```
+
+Note the empty STORAGECLASS column. That empty column is the signature of this problem.
+
+### The fix
+
+Create a gp3 StorageClass backed by the EBS CSI driver, and mark it default:
+
+```bash
+cat > gp3-sc.yaml << 'EOF'
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: gp3
+  annotations:
+    storageclass.kubernetes.io/is-default-class: "true"
+provisioner: ebs.csi.aws.com
+volumeBindingMode: WaitForFirstConsumer
+allowVolumeExpansion: true
+reclaimPolicy: Delete
+parameters:
+  type: gp3
+  encrypted: "true"
+EOF
+
+kubectl apply -f gp3-sc.yaml
+```
+
+Verify:
+
+```bash
+kubectl get sc
+```
+
+```
+NAME            PROVISIONER             RECLAIMPOLICY   VOLUMEBINDINGMODE      ALLOWVOLUMEEXPANSION   AGE
+gp2             kubernetes.io/aws-ebs   Delete          WaitForFirstConsumer   false                  24h
+gp3 (default)   ebs.csi.aws.com         Delete          WaitForFirstConsumer   true                   10s
+```
+
+`gp3 (default)` with provisioner `ebs.csi.aws.com` is what you need.
+
+Why gp3 rather than gp2: it is cheaper per gigabyte, delivers a 3,000 IOPS baseline regardless of volume size, and supports volume expansion. There is no reason to choose gp2 on a new cluster.
+
+---
+
+## Verifying Storage
+
+Prove that provisioning works end to end before installing anything. Two minutes here prevents twenty minutes of debugging later.
 
 ```bash
 cat > test-pvc.yaml << 'EOF'
@@ -222,15 +291,7 @@ spec:
   resources:
     requests:
       storage: 1Gi
-EOF
-
-kubectl apply -f test-pvc.yaml
-```
-
-The default gp2 StorageClass uses `WaitForFirstConsumer`, so the PVC stays `Pending` until a pod actually mounts it. That is expected and is not a failure. Create a pod to trigger provisioning:
-
-```bash
-cat > test-pod.yaml << 'EOF'
+---
 apiVersion: v1
 kind: Pod
 metadata:
@@ -249,20 +310,24 @@ spec:
         claimName: storage-test
 EOF
 
-kubectl apply -f test-pod.yaml
-kubectl get pvc storage-test -w
+kubectl apply -f test-pvc.yaml
 ```
 
-Within about 30 seconds the PVC status changes to `Bound`. Press Ctrl+C to stop watching.
+The gp3 StorageClass uses `WaitForFirstConsumer`, so the PVC stays Pending until a pod actually mounts it. Creating both together triggers provisioning immediately.
 
-`Bound` confirms the CSI driver has IAM permissions, created a real EBS volume, and attached it. The monitoring stack will now install cleanly.
-
-Remove the test resources:
+Wait about 30 seconds, then check:
 
 ```bash
-kubectl delete pod storage-test-pod
-kubectl delete pvc storage-test
-rm test-pvc.yaml test-pod.yaml
+kubectl get pvc storage-test
+```
+
+You want `Bound`, with `gp3` in the STORAGECLASS column. That confirms the CSI driver has working IAM permissions, created a real EBS volume, and attached it.
+
+Clean up:
+
+```bash
+kubectl delete -f test-pvc.yaml
+rm test-pvc.yaml
 ```
 
 ---
