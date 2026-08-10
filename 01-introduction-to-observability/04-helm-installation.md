@@ -79,13 +79,17 @@ The chart is updated frequently, so your version will very likely be higher. Tha
 
 Prometheus, Alertmanager and Grafana all request PersistentVolumeClaims in this configuration.
 
-EKS ships a `gp2` StorageClass by default, so `kubectl get sc` returns a result and the cluster looks ready for storage. But a StorageClass is only a definition. The component that actually creates the EBS volume is the **EBS CSI driver**, and it is not installed on EKS by default.
+Two separate things must be true, and EKS gives you neither by default.
 
-Without it, the PVCs sit in `Pending` forever, the StatefulSet pods never schedule, and Helm still reports a successful install.
+**The EBS CSI driver must be installed.** It is the component that actually creates the EBS volume. We added it as an addon during cluster creation.
+
+**A usable default StorageClass must exist.** This is the one that catches people. EKS ships a StorageClass called `gp2`, so `kubectl get sc` returns a result and the cluster looks ready. But that StorageClass uses the `kubernetes.io/aws-ebs` in-tree provisioner, which was removed from Kubernetes in version 1.31. On a 1.34 cluster nothing implements it. It is also not marked as default.
+
+If either is missing, the PVCs sit in `Pending` forever, the StatefulSet pods never schedule, and Helm still reports a successful install.
 
 Read that again, because it is the single most confusing failure in this whole module. Helm says `STATUS: deployed`. It looks like a Helm problem. It is a storage problem.
 
-We installed the driver as an addon during cluster creation, so this should already be correct. Step 1 verifies it.
+Step 1 verifies both.
 
 ### Port forwarding from a jump box
 
@@ -119,7 +123,15 @@ Both nodes must be `Ready`. If you scaled the nodegroup to zero between sessions
 kubectl get sc
 ```
 
-You should see `gp2` marked `(default)`.
+You need a default StorageClass whose provisioner is `ebs.csi.aws.com`:
+
+```
+NAME            PROVISIONER             RECLAIMPOLICY   VOLUMEBINDINGMODE      ALLOWVOLUMEEXPANSION   AGE
+gp2             kubernetes.io/aws-ebs   Delete          WaitForFirstConsumer   false                  24h
+gp3 (default)   ebs.csi.aws.com         Delete          WaitForFirstConsumer   true                   5m
+```
+
+If you only see `gp2`, with no `(default)` marker and the `kubernetes.io/aws-ebs` provisioner, stop here. Create the gp3 StorageClass from CLUSTER-SETUP.md before continuing, otherwise this install will fail in a way that looks like a Helm error.
 
 ```bash
 kubectl get pods -n kube-system | grep ebs-csi
@@ -367,10 +379,10 @@ kubectl get pvc -n monitoring
 Every PVC must show `Bound`:
 
 ```
-NAME                                                                     STATUS   VOLUME     CAPACITY   ACCESS MODES   AGE
-alertmanager-kube-prometheus-stack-alertmanager-db-...-0                  Bound    pvc-a1b2   2Gi        RWO            4m
-kube-prometheus-stack-grafana                                            Bound    pvc-c3d4   5Gi        RWO            4m
-prometheus-kube-prometheus-stack-prometheus-db-...-0                     Bound    pvc-e5f6   20Gi       RWO            4m
+NAME                                                      STATUS   VOLUME     CAPACITY   ACCESS MODES   STORAGECLASS   AGE
+alertmanager-kube-prometheus-stack-alertmanager-db-...-0   Bound    pvc-9463   2Gi        RWO            gp3            4m
+kube-prometheus-stack-grafana                             Bound    pvc-d3ca   5Gi        RWO            gp3            4m
+prometheus-kube-prometheus-stack-prometheus-db-...-0       Bound    pvc-f3e4   20Gi       RWO            gp3            4m
 ```
 
 `Bound` means the EBS CSI driver successfully created a real EBS volume in AWS and attached it. Anything showing `Pending` here means storage is broken, and the pods will never start. See Troubleshooting below.
@@ -481,7 +493,20 @@ kubectl describe pvc -n monitoring | grep -A 10 Events
 
 Look at the Events section.
 
-- `waiting for first consumer to be created` alone is normal and temporary. The default gp2 StorageClass uses `WaitForFirstConsumer`, so the volume is not created until a pod actually needs it.
+First, check the STORAGECLASS column in `kubectl get pvc -n monitoring`.
+
+**If it is empty**, no StorageClass was assigned, and the PVC can never bind. This means there is no default StorageClass on the cluster. Create the gp3 StorageClass from CLUSTER-SETUP.md, then uninstall and reinstall, because a PVC's `storageClassName` is immutable and existing Pending claims will never recover:
+
+```bash
+helm uninstall kube-prometheus-stack -n monitoring
+kubectl delete pvc --all -n monitoring
+```
+
+Then install again.
+
+**If a class is named**, read the Events instead:
+
+- `waiting for first consumer to be created` alone is normal and temporary, because `WaitForFirstConsumer` delays the volume until a pod needs it.
 - `UnauthorizedOperation` or an IAM error means the EBS CSI driver lacks permissions. Verify the pod identity association exists:
 
 ```bash
@@ -552,7 +577,9 @@ Memory limit reached. On a large cluster this usually means high cardinality fro
 
 - `kube-prometheus-stack` installs the operator, Prometheus, Alertmanager, Grafana, node-exporter and kube-state-metrics as one tested release.
 - Chart version and app version are different things. The chart is the packaging, the app version is the Prometheus Operator release.
-- The EBS CSI driver must be installed for the PVCs to bind. Without it, Helm reports success while every pod sits Pending.
+- Storage needs two things on EKS: the EBS CSI driver addon, and a default StorageClass using the `ebs.csi.aws.com` provisioner. The built-in `gp2` class uses a provisioner removed in Kubernetes 1.31 and is not marked default.
+- An empty STORAGECLASS column in `kubectl get pvc` means no default StorageClass exists. That PVC will never bind, and it cannot be repaired in place because `storageClassName` is immutable.
+- Without working storage, Helm reports success while every pod with a PVC sits Pending.
 - `serviceMonitorSelectorNilUsesHelmValues: false` makes Prometheus watch all namespaces. Without it, ServiceMonitors you create later are silently ignored.
 - Without `storageSpec`, Prometheus stores metrics in `emptyDir` and loses all history on every restart.
 - Prometheus and Alertmanager run two containers. The second is `config-reloader`.
